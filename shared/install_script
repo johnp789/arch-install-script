@@ -65,7 +65,7 @@ dogenfstab(){
 
 dochroot(){
     echo "Setting time zone"
-    arch-chroot /mnt timedatectl set-timezone $TIMEZONE
+    ln -sf /usr/share/zoneinfo/${TIMEZONE} /mnt/etc/localtime
     echo "Configuring hwclock"
     arch-chroot /mnt hwclock --systohc
     echo "Configuring locale"
