@@ -1,0 +1,141 @@
+#!/usr/bin/bash
+
+. install_script_settings
+
+partitiondisk(){
+    echo "Creating MBR partition table for ${BOOT_USBKEY}"
+    (echo o; echo n; echo p; echo 1; echo ; echo ; echo w) | fdisk ${BOOT_USBKEY}
+    bootdev=${BOOT_USBKEY}"1"
+
+    echo "Creating new GPT for ${TGT_DEVICE}"
+    parted -s ${TGT_DEVICE} mklabel gpt
+
+    echo "Creating BIOS boot partition"
+    sgdisk ${TGT_DEVICE} -n=1:0:+1M -t=1:ef02
+
+    echo "Creating root partition"
+    sgdisk ${TGT_DEVICE} -n=2:0:0
+    lukspartition=${TGT_DEVICE}"2"
+}
+
+formatdisk(){
+    echo "Formatting /boot partition"
+    mkfs.ext4 -F -L USBBOOT $bootdev
+
+    echo "cryptsetup luksFormat"
+    echo -n $PASSPHRASE | cryptsetup luksFormat $lukspartition -d -
+    echo -n $PASSPHRASE | cryptsetup open --type luks $lukspartition root -d -
+    luksrootuuid=$(cryptsetup luksUUID $lukspartition)
+    luksdev=/dev/mapper/root
+
+    # echo "Doing secure erase"
+    # dd if=/dev/zero of=/dev/mapper/root bs=60M
+
+    echo "Creating LVM physical volume"
+    pvcreate $luksdev
+    echo "Creating LVM volume group"
+    volgroup=VolGroup00
+    vgcreate $volgroup $luksdev
+    echo "Creating LVM logical volume for /"
+    rootlogicalvolume=volroot
+    lvcreate -L 50G $volgroup -n $rootlogicalvolume
+
+    echo "formatting /"
+    rootdev=/dev/mapper/${volgroup}-${rootlogicalvolume}
+    mkfs.btrfs -f $rootdev
+}
+
+mountpartitions(){
+    echo "Mounting / partition"
+    mount $rootdev /mnt
+    echo "Mounting /boot partition"
+    mkdir /mnt/boot
+    mount $bootdev /mnt/boot
+}
+
+runpacstrap(){
+    echo "Running pacstrap"
+    pacstrap /mnt base grub lvm2 btrfs-progs intel-ucode openssh sudo python
+}
+
+dogenfstab(){
+    echo "Running genfstab"
+    genfstab -U /mnt >> /mnt/etc/fstab
+}
+
+dochroot(){
+    echo "Setting time zone"
+    arch-chroot /mnt timedatectl set-timezone $TIMEZONE
+    echo "Configuring hwclock"
+    arch-chroot /mnt hwclock --systohc
+    echo "Configuring locale"
+    echo en_US.UTF-8 UTF-8 >> /mnt/etc/locale.gen
+    arch-chroot /mnt locale-gen
+    echo LANG=en_US.UTF-8 >> /mnt/etc/locale.conf
+    echo "Configuring hostname"
+    echo $HOSTNAME > /mnt/etc/hostname
+    echo 127.0.1.1  ${HOSTNAME}.localdomain $HOSTNAME >> /mnt/etc/hosts
+    echo "Configuring Ethernet as DHCP IPv4 client"
+    cat > /mnt/etc/systemd/network/50-wired.network <<EOF
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+EOF
+    echo "Enabling systemd-networkd and systemd-resolved"
+    arch-chroot /mnt systemctl enable systemd-networkd.service
+    arch-chroot /mnt systemctl enable systemd-resolved.service
+    ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
+
+    echo "Setting up initramfs"
+    sed -i 's/^HOOKS=.*/HOOKS=(base udev keyboard block autodetect modconf encrypt lvm2 filesystems fsck)/' /mnt/etc/mkinitcpio.conf
+    sed -i 's/^MODULES=.*/MODULES=(uhci_hcd xhci_hcd ext4)/' /mnt/etc/mkinitcpio.conf
+    arch-chroot /mnt mkinitcpio -p linux
+
+    echo "Configuring and installing grub"
+    sed -i "s#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\"cryptdevice=/dev/disk/by-uuid/${luksrootuuid}:root cryptkey=/dev/disk/by-label/USBBOOT:ext4:/encryption.txt root=${rootdev}\"#" /mnt/etc/default/grub
+    arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+    arch-chroot /mnt grub-install --target=i386-pc --recheck ${BOOT_USBKEY}
+
+    echo -n $PASSPHRASE > /mnt/boot/encryption.txt
+
+    echo "Configuring users"
+    # make root passwordless
+    passwd -R /mnt -l root
+
+    sed -i 's/^# %wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) NOPASSWD: ALL/' /mnt/etc/sudoers
+
+    # create the accounts for operators
+    for this_user in $OPS_TO_CREATE ; do
+        useradd -R /mnt -m -s /bin/bash ${this_user}
+        passwd -R /mnt -l ${this_user}
+        usermod -R /mnt -aG wheel ${this_user}
+        usermod -R /mnt -aG disk ${this_user}
+        if [ -f ${this_user}.pub ]; then
+            mkdir -m 0700 /mnt/home/${this_user}/.ssh
+            cat ${this_user}.pub > /mnt/home/${this_user}/.ssh/authorized_keys
+            chmod 0600 /mnt/home/${this_user}/.ssh/authorized_keys
+            arch-chroot /mnt chown -R ${this_user}.${this_user} /home/${this_user}/.ssh
+        else
+            echo Created user ${this_user} but no public key was found!
+        fi
+    done
+
+    echo "Enabling sshd"
+    arch-chroot /mnt systemctl enable sshd.service
+}
+
+if [ -b ${TGT_DEVICE} ]; then
+    partitiondisk
+    formatdisk
+    mountpartitions
+    runpacstrap
+    dogenfstab
+    dochroot
+fi
+
+echo Disk setup is complete.  Here is filesystem encryption key:
+echo $PASSPHRASE
+echo
+echo Note that the first boot on real hardware may require the fallback initramfs.

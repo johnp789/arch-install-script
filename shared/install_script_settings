@@ -1,0 +1,8 @@
+HOSTNAME=kylo
+TIMEZONE=America/Chicago
+PASSPHRASE=$(dd if=/dev/urandom count=36 bs=1 status=none | base64 --wrap=0)
+BOOT_USBKEY=/dev/vda
+TGT_DEVICE=/dev/vdb
+
+# space-delimited list of operator accounts to create
+OPS_TO_CREATE=john ansible

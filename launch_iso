@@ -1,0 +1,47 @@
+#!/usr/bin/bash
+
+# These must be edited
+ISO_FILE=~/Downloads/archlinux-2018.03.01-x86_64.iso
+TARGET_BOOT=/dev/disk/by-id/usb-_USB_DISK_2.0_070B4B04B6F60134-0:0
+TARGET_SSD=/dev/disk/by-id/ata-Samsung_SSD_850_EVO_500GB_S21HNXAG453024W
+BUILD_MACHINE_HOSTNAME=pedro
+VM_SSH_PORT=2222
+
+if [ ! -f ${ISO_FILE} ]; then
+    echo ${ISO_FILE} not found
+    exit
+fi
+if [ ! -e ${TARGET_BOOT} ]; then
+    echo ${TARGET_BOOT} not found
+    exit
+fi
+if [ ! -e ${TARGET_SSD} ]; then
+    echo ${TARGET_SSD} not found
+    exit
+fi
+
+cd shared
+python -m http.server &
+cd ..
+
+echo 'In the VM, run chpasswd <<<"root:f00" && systemctl start sshd'
+echo Then, ssh as root to the vm on port ${VM_SSH_PORT} and do the following:
+echo     curl -Os http://${BUILD_MACHINE_HOSTNAME}:8000/install_script
+echo     curl -Os http://${BUILD_MACHINE_HOSTNAME}:8000/install_script_settings
+echo     curl -Os http://${BUILD_MACHINE_HOSTNAME}:8000/john.pub \# get each pubkey
+echo     curl -Os http://${BUILD_MACHINE_HOSTNAME}:8000/ansible.pub
+
+umount ${TARGET_BOOT}-part*
+umount ${TARGET_SSD}-part*
+
+qemu-system-x86_64 \
+-m 4G \
+-smp 2 \
+-drive file=${TARGET_BOOT},cache=none,if=virtio,format=raw \
+-drive file=${TARGET_SSD},cache=none,if=virtio,format=raw \
+-drive file=${ISO_FILE},media=cdrom \
+-boot menu=on,splash-time=5000 \
+-enable-kvm \
+-net nic,model=virtio \
+-net user,hostfwd=tcp::${VM_SSH_PORT}-:22
+kill %1
